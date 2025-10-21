@@ -672,13 +672,14 @@ struct CollectiveMainloopFwdSm90 {
         int32_t bidh = get<1>(block_coord);
         int32_t bidb = get<2>(block_coord);
         const int nblock_seqlen = ((seqlen_info.seqlen_k + kBlockN - 1) / kBlockN + 3) / 4 * 4; // umiswing: padding for int4 load
+        const int remain_nblock_seqlen = nblock_seqlen > Flashmask_n_block_buffer_valid_length ? nblock_seqlen - reverse_chunk_idx * Flashmask_n_block_buffer_valid_length : nblock_seqlen;
 
         // row_offset
         const int offset = (bidb * params.h_flashmask + bidh / params.h_h_flashmask_ratio) * nblock_seqlen +
             std::max((nblock_seqlen - (reverse_chunk_idx + 1) * Flashmask_n_block_buffer_valid_length), 0);
 
         const int thread_idx = threadIdx.x - 32;
-        const int length  = Flashmask_n_block_buffer_valid_length < nblock_seqlen ? Flashmask_n_block_buffer_valid_length : nblock_seqlen;
+        const int length = Flashmask_n_block_buffer_valid_length < remain_nblock_seqlen ? Flashmask_n_block_buffer_valid_length : remain_nblock_seqlen;
 
         // it's a pity that tag cannot have static dispatch, since load_max_min should remain the same
         // across different main loop implementation. We can implement a func with default 
@@ -840,14 +841,16 @@ struct CollectiveMainloopFwdSm90 {
       int32_t valid_n_block_num = 0;
 
       const int32_t nblock_seqlen = ((seqlen_info.seqlen_k + kBlockN - 1) / kBlockN + 3) / 4 * 4; // umiswing: padding for int4 load
+      const int32_t remain_nblock_seqlen = nblock_seqlen - reverse_chunk_idx * Flashmask_n_block_buffer_valid_length;
       const int32_t base_offset = std::max(nblock_seqlen - (reverse_chunk_idx + 1) * Flashmask_n_block_buffer_valid_length, 0);
+      const int32_t length = remain_nblock_seqlen < Flashmask_n_block_buffer_valid_length ? remain_nblock_seqlen : Flashmask_n_block_buffer_valid_length;
 
       // explanation for the loop condition:
       // -2, -1,  0,  1,  2
       // t4, t3, t2, t1, t0
       // although t4 and t3 are oob, they should not exit the loop, otherwise, the prefix-sum inside the loop will hang, just keep a default value is fine
-      for(int32_t idx = Flashmask_n_block_buffer_valid_length - 1 - thread_idx % ProducerThreadNum; 
-          idx >= (0 - (ProducerThreadNum - Flashmask_n_block_buffer_valid_length % ProducerThreadNum)); idx -= ProducerThreadNum
+      for(int32_t idx = length - 1 - thread_idx % ProducerThreadNum; 
+          idx >= (0 - (ProducerThreadNum - length % ProducerThreadNum)); idx -= ProducerThreadNum
       ) {
         int32_t n_block = base_offset + idx;
         int prefix_sum = 0;
