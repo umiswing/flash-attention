@@ -213,6 +213,7 @@ public:
         CollectiveMainloop mainloop;
         CollectiveEpilogue epilogue;
         __shared__ __align__(16) int32_t flashmask_smem_[8];
+        __shared__ int32_t m_block_smem[CollectiveMainloop::Flashmask_m_block_buffer_length];
         __shared__ __align__(128) int32_t flashmask_index_smem_[kBlockN * 4];
 
         // We need this to guarantee that the Pipeline init is visible to all producers and consumer blocks in the Cluster
@@ -239,7 +240,7 @@ public:
                 auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
                 auto [n_block, bidh, bidb, _ /*split_idx*/] = block_coord_;
                 cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
-                mainloop.load_n_block_info(flashmask_smem_,flashmask_index_smem_,block_coord, params.mainloop);
+                mainloop.load_n_block_info(flashmask_smem_,flashmask_index_smem_, m_block_smem, block_coord, params.mainloop, cutlass::NumThreadsPerWarp * 4);
                 if (warp_idx_in_warpgroup == 0) {  // Load K, V, and do TMA on Q and dO
                     PipelineState smem_pipe_write = cutlass::make_producer_start_state<MainloopPipeline>();
                     PipelineState_dO smem_pipe_write_do = cutlass::make_producer_start_state<MainloopPipeline_dO>();
@@ -251,7 +252,7 @@ public:
                         };
 //                        mainloop.load_n_block_info(flashmask_smem_,flashmask_index_smem_,block_coord, params.mainloop);
                         mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
-                                      smem_pipe_write_do, shared_storage, scheduler_prefetch, block_coord,flashmask_smem_);
+                                      smem_pipe_write_do, shared_storage, scheduler_prefetch, block_coord,flashmask_smem_, m_block_smem);
 //                        mainloop.wait_for_release_n_block_info();
                     mainloop.load_tail(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
                 } else if (warp_idx_in_warpgroup == 1) {
@@ -259,7 +260,7 @@ public:
 //                        auto [n_block, bidh, bidb, _ /*split_idx*/] = block_coord_;
 //                        cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
 //                        mainloop.load_n_block_info(flashmask_smem_,flashmask_index_smem_,block_coord, params.mainloop);
-                        mainloop.store_dq(params.mainloop, shared_storage, block_coord,flashmask_smem_);
+                        mainloop.store_dq(params.mainloop, shared_storage, block_coord,flashmask_smem_, m_block_smem);
 //                        mainloop.wait_for_release_n_block_info();
                 }else{
 //                        auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
@@ -300,7 +301,7 @@ public:
                 mainloop.wait_for_load_n_block_info();
                 bool tile_valid = mainloop.mma(
                     params.mainloop, pipeline_q, pipeline_do, smem_pipe_read, smem_pipe_read_do,
-                    tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage,flashmask_smem_, flashmask_index_smem_);
+                    tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage,flashmask_smem_, flashmask_index_smem_, m_block_smem);
                 if (tile_valid) {
                     epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV,
                                    threadIdx.x - NumCopyThreads, block_coord);
