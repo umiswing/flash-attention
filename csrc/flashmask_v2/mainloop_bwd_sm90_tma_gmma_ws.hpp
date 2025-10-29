@@ -566,7 +566,7 @@ struct CollectiveMainloopBwdSm90 {
             // so std::max sets the increment to 0. This ensures offset will not decrease
             // and only increases when loop_end > m_block.
             offset += std::max((loop_end - m_block), 0);
-            m_block = loop_end;
+            m_block = std::max(m_block, loop_end);
             loop_end = (fm_mem[4]/*ut_start_nblockmax*/ -1) / kBlockM;
             #pragma unroll
             for(int blk_idx = m_block + thread_idx; blk_idx <= loop_end; blk_idx += threads_num) {
@@ -576,6 +576,7 @@ struct CollectiveMainloopBwdSm90 {
             // umiswing: Note that when placing the 'loop_end' block into m_block_smem,
             // the offset should be incremented by (loop_end - m_block + 1).
             offset += std::max((loop_end - m_block + 1), 0);
+            m_block = std::max(m_block, loop_end + 1);
           }
           m_block = std::max(m_block, fm_mem[7]/*ut_end_nblockmin*/ / kBlockM);
           loop_end = std::min((fm_mem[6]/*ut_end_nblockmax*/-1) / kBlockM, m_block_max-1);
@@ -585,7 +586,7 @@ struct CollectiveMainloopBwdSm90 {
             // partially_masked = true;
           }
           offset += std::max((loop_end - m_block + 1), 0);
-          m_block = loop_end + 1;
+          m_block = std::max(m_block, loop_end + 1);
         }
         loop_end = std::min(fm_mem[1]/*lt_start_nblockmin*/ / kBlockM,m_block_max);
         #pragma unroll
@@ -594,7 +595,10 @@ struct CollectiveMainloopBwdSm90 {
           // partially_masked = false;
         }
         offset += std::max((loop_end - m_block), 0);
-        m_block = loop_end;
+
+        // umiswing: here is a problem, if the m_block > loop_end, then after this assignment,
+        // m_block is reset to loop_end
+        m_block = std::max(m_block, loop_end);
         //partial_maskloop_end
         loop_end = std::min(m_block_max-1,(fm_mem[0]/*lt_start_nblockmax*/ -1 )/ kBlockM);
         #pragma unroll
@@ -603,6 +607,7 @@ struct CollectiveMainloopBwdSm90 {
           // partially_masked = true;
         }
         offset += std::max((loop_end - m_block + 1), 0);
+        m_block = std::max(m_block, loop_end + 1);
         if constexpr (Has_lt_end) {
             m_block = std::max(m_block,fm_mem[3]/*lt_end_nblockmin*/ / kBlockM);
             //partial_maskloop_end
@@ -613,7 +618,7 @@ struct CollectiveMainloopBwdSm90 {
               // partially_masked = true;
             }
             offset += std::max((loop_end - m_block + 1), 0);
-            m_block = loop_end + 1;
+            m_block = std::max(m_block, loop_end + 1);
             #pragma unroll
             for (int blk_idx = m_block + thread_idx; blk_idx < m_block_max; blk_idx += threads_num) {
               m_block_smem[offset + thread_idx] = blk_idx;
