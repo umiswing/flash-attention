@@ -508,7 +508,7 @@ struct CollectiveMainloopBwdSm90 {
     // }
 
     CUTLASS_DEVICE
-    void load_n_block_info(int32_t * fm_mem, int32_t * flashmask_index_smem_, int32_t * m_block_smem, cute::tuple<int32_t, int32_t, int32_t> block_coord, Params const& params, int threads_num){
+    void load_n_block_info(int32_t * fm_mem, int32_t * flashmask_index_smem_, int32_t * m_block_smem, bool * partially_masked_smem, cute::tuple<int32_t, int32_t, int32_t> block_coord, Params const& params, int threads_num){
         auto [n_block, bidh, bidb] = block_coord;
         SeqlenInfo_t seqlen_info{
             bidb, get<0>(params.shape_Q), size<0>(params.shape_K),
@@ -561,6 +561,7 @@ struct CollectiveMainloopBwdSm90 {
             for(int blk_idx = m_block + thread_idx; blk_idx < loop_end; blk_idx += threads_num) {
               m_block_smem[offset + thread_idx] = blk_idx;
               // partially_masked = false;
+              partially_masked_smem[offset + thread_idx] = false;
             }
             // umiswing: If loop_end <= m_block, (loop_end - m_block) will be <= 0,
             // so std::max sets the increment to 0. This ensures offset will not decrease
@@ -572,6 +573,7 @@ struct CollectiveMainloopBwdSm90 {
             for(int blk_idx = m_block + thread_idx; blk_idx <= loop_end; blk_idx += threads_num) {
               m_block_smem[offset + thread_idx] = blk_idx;
               // partially_masked = true;
+              partially_masked_smem[offset + thread_idx] = true;
             }
             // umiswing: Note that when placing the 'loop_end' block into m_block_smem,
             // the offset should be incremented by (loop_end - m_block + 1).
@@ -584,6 +586,7 @@ struct CollectiveMainloopBwdSm90 {
           for (int blk_idx = m_block + thread_idx; blk_idx <= loop_end; blk_idx += threads_num) {
             m_block_smem[offset + thread_idx] = blk_idx;
             // partially_masked = true;
+            partially_masked_smem[offset + thread_idx] = true;
           }
           offset += std::max((loop_end - m_block + 1), 0);
           m_block = std::max(m_block, loop_end + 1);
@@ -593,6 +596,7 @@ struct CollectiveMainloopBwdSm90 {
         for (int blk_idx = m_block + thread_idx; blk_idx < loop_end; blk_idx += threads_num) {
           m_block_smem[offset + thread_idx] = blk_idx;
           // partially_masked = false;
+          partially_masked_smem[offset + thread_idx] = false;
         }
         offset += std::max((loop_end - m_block), 0);
 
@@ -605,6 +609,7 @@ struct CollectiveMainloopBwdSm90 {
         for (int blk_idx = m_block + thread_idx; blk_idx <= loop_end; blk_idx += threads_num) {
           m_block_smem[offset + thread_idx] = blk_idx;
           // partially_masked = true;
+          partially_masked_smem[offset + thread_idx] = true;
         }
         offset += std::max((loop_end - m_block + 1), 0);
         m_block = std::max(m_block, loop_end + 1);
@@ -616,6 +621,7 @@ struct CollectiveMainloopBwdSm90 {
             for (int blk_idx = m_block + thread_idx; blk_idx <= loop_end; blk_idx += threads_num) {
               m_block_smem[offset + thread_idx] = blk_idx;
               // partially_masked = true;
+              partially_masked_smem[offset + thread_idx] = true;
             }
             offset += std::max((loop_end - m_block + 1), 0);
             m_block = std::max(m_block, loop_end + 1);
@@ -623,6 +629,7 @@ struct CollectiveMainloopBwdSm90 {
             for (int blk_idx = m_block + thread_idx; blk_idx < m_block_max; blk_idx += threads_num) {
               m_block_smem[offset + thread_idx] = blk_idx;
               // partially_masked = false;
+              partially_masked_smem[offset + thread_idx] = false;
             }
             offset += std::max((m_block_max - m_block), 0);
         }
@@ -952,7 +959,8 @@ struct CollectiveMainloopBwdSm90 {
         SharedStorage& shared_storage,
         int32_t const * flashmask_mem_,
         int32_t const * flashmask_index_smem_,
-        int32_t const * m_block_smem
+        int32_t const * m_block_smem,
+        bool const * partially_masked_smem
         ) {
         static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
@@ -1305,7 +1313,7 @@ struct CollectiveMainloopBwdSm90 {
           // if (thread_idx == 0 && n_block == 0 && bidh == 0 && bidb == 0 && m_block_idx < Flashmask_m_block_buffer_length) {
           //   printf("\nm_block_smem[%d]:%d, threadIdx.x:%d, blockIdx.x:%d, thread_idx:%d, n_block:%d, bidh:%d, bidb:%d", m_block_idx, m_block_smem[m_block_idx], threadIdx.x, blockIdx.x, thread_idx, n_block, bidh, bidb);
           // }
-          bwd_step(m_block, mask_fn, true, flashmask_index_smem_);
+          bwd_step(m_block, mask_fn, partially_masked_smem[m_block_idx], flashmask_index_smem_);
           ++m_block_idx;
           m_block = m_block_smem[m_block_idx];
         }
