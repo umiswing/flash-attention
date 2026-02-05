@@ -743,9 +743,9 @@ def _flash_attn_bwd(
 
     place = q.place
     # TODO: check if this is the right rounding
-    dq = paddle.zeros_like(q)
-    dk = paddle.zeros_like(k)
-    dv = paddle.zeros_like(v)
+    dq = paddle.empty_like(q)
+    dk = paddle.empty_like(k)
+    dv = paddle.empty_like(v)
 
     head_dim_rounded = (head_dim + 32 - 1) // 32 * 32
 

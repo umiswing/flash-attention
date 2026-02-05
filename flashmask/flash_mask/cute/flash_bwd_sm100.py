@@ -168,9 +168,9 @@ class FlashAttentionBackwardSm100:
             self.num_regs_reduce = 152
             self.num_regs_compute = 136
         else:
-            self.num_regs_reduce = 136
+            self.num_regs_reduce = 144
             self.num_regs_compute = 144
-        self.num_regs_other = 96 - 8
+        self.num_regs_other = 96 - 16
         self.num_regs_empty = 24
         assert self.num_regs_reduce + self.num_regs_compute * 2 + self.num_regs_other <= 512
 
@@ -626,6 +626,45 @@ class FlashAttentionBackwardSm100:
 
         @cute.struct
         class SharedStorage:
+            # Smem tensors
+            # sQ is reused for sdK which in the non-MHA case needs float32
+            sQ: cute.struct.Align[
+                cute.struct.MemRange[cute.Uint8, sQ_alloc_bytes],
+                self.buffer_align_bytes,
+            ]
+            sK: cute.struct.Align[
+                cute.struct.MemRange[self.k_dtype, cute.cosize(self.sK_layout)],
+                self.buffer_align_bytes,
+            ]
+            sV: cute.struct.Align[
+                cute.struct.MemRange[self.v_dtype, cute.cosize(self.sV_layout)],
+                self.buffer_align_bytes,
+            ]
+            # sdO is reused for sdV which in the non-MHA case needs float32
+            sdO: cute.struct.Align[
+                cute.struct.MemRange[cute.Uint8, sdO_alloc_bytes],
+                self.buffer_align_bytes,
+            ]
+            sdQaccum: cute.struct.Align[
+                cute.struct.MemRange[self.dqaccum_dtype, cute.cosize(self.sdQaccum_layout)],
+                self.buffer_align_bytes,
+            ]
+            sdS: cute.struct.Align[
+                cute.struct.MemRange[self.ds_dtype, cute.cosize(self.sdSt_layout)],
+                128,
+            ]
+            sLSE: cute.struct.Align[
+                cute.struct.MemRange[self.lse_dtype, cute.cosize(self.sLSE_layout)],
+                128,
+            ]
+            sdPsum: cute.struct.Align[
+                cute.struct.MemRange[self.dpsum_dtype, cute.cosize(self.sdPsum_layout)],
+                128,
+            ]
+            sStartEndRowIndices: cute.struct.Align[
+                cute.struct.MemRange[self.startend_row_indices_dtype, cute.cosize(self.sStartEndRowIndices_layout)],
+                64,
+            ]
             Q_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
             dO_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.dO_stage]
             LSE_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
@@ -641,82 +680,10 @@ class FlashAttentionBackwardSm100:
             dQ_cluster_empty_mbar_ptr: cute.struct.MemRange[
                 cutlass.Int64, self.dQaccum_reduce_stage // 2
             ]
-            tmem_holding_buf: Int32
             tmem_dealloc_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
             flashmask_loaded_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
             sFM_max_min_ptr: cute.struct.MemRange[cutlass.Int32, 8]
-            # 240
-            sdPsum: cute.struct.Align[
-                cute.struct.MemRange[self.dpsum_dtype, cute.cosize(self.sdPsum_layout)],
-                128,
-            ]
-
-            # Smem tensors
-            # sQ is reused for sdK which in the non-MHA case needs float32
-            sQ: cute.struct.Align[
-                cute.struct.MemRange[cute.Uint8, sQ_alloc_bytes],
-                self.buffer_align_bytes,
-            ]
-            # self.sQ_layout S<3,4,3> o 0 o ((128,16),1,(4,2),2):((64,1),0,(16,8192),16384)
-            # 128 * 16 * 4 * 2 * 2 = 32768 * 2 = 65536
-            # 66560
-            sK: cute.struct.Align[
-                cute.struct.MemRange[self.k_dtype, cute.cosize(self.sK_layout)],
-                self.buffer_align_bytes,
-            ]
-            # self.sK_layout S<3,4,3> o 0 o ((128,16),1,(4,2)):((64,1),0,(16,8192))
-            # 128 * 16 * 4 * 2 = 16384 * 2 = 32768
-            # 99328
-            sV: cute.struct.Align[
-                cute.struct.MemRange[self.v_dtype, cute.cosize(self.sV_layout)],
-                self.buffer_align_bytes,
-            ]
-            # self.sV_layout S<3,4,3> o 0 o ((128,16),1,(4,2)):((64,1),0,(16,8192))
-            # 128 * 16 * 4 * 2 = 16384 * 2 = 32768
-            # 132096
-            # sdO is reused for sdV which in the non-MHA case needs float32
-            sdO: cute.struct.Align[
-                cute.struct.MemRange[cute.Uint8, sdO_alloc_bytes],
-                self.buffer_align_bytes,
-            ]
-            # self.sdO_layout S<3,4,3> o 0 o (((64,2),16),1,8,1):(((1,8192),64),0,1024,0)
-            # 64 * 2 * 16 * 8 = 16384 * 2 = 32768
-            # 164864
-            sdQaccum: cute.struct.Align[
-                cute.struct.MemRange[self.dqaccum_dtype, cute.cosize(self.sdQaccum_layout)],
-                self.buffer_align_bytes,
-            ]
-            # self.sdQaccum_layout (4096,2):(1,4096)
-            # 4096 * 2 = 8192 * 4 = 32768
-            # 197632
-            sdS: cute.struct.Align[
-                cute.struct.MemRange[self.ds_dtype, cute.cosize(self.sdSt_layout)],
-                128,
-            ]
-            # self.sdSt_layout S<3,4,3> o 0 o ((128,16),1,(4,2)):((64,1),0,(16,8192))
-            # 128 * 16 * 4 * 2 = 16384 * 2 = 32768
-            # 230400
-            sLSE: cute.struct.Align[
-                cute.struct.MemRange[self.lse_dtype, cute.cosize(self.sLSE_layout)],
-                128,
-            ]
-            # self.sLSE_layout (128,2):(1,128)
-            # 128 * 2 = 256 * 4 = 1024
-            # 231424
-            #sdPsum: cute.struct.Align[
-            #    cute.struct.MemRange[self.dpsum_dtype, cute.cosize(self.sdPsum_layout)],
-            #    128,
-            #]
-            # self.sdPsum_layout (128,1):(1,128)
-            # 128 * 1 = 128 * 4 = 512
-            # 232448
-            sStartEndRowIndices: cute.struct.Align[
-                cute.struct.MemRange[self.startend_row_indices_dtype, cute.cosize(self.sStartEndRowIndices_layout)],
-                64,
-            ]
-            # sStartEndRowIndices_layout (128,4):(1,128)
-            # 128 * 4 = 512 * 4 = 2048
-            # 234496
+            tmem_holding_buf: Int32
 
         self.shared_storage = SharedStorage
         #print("self.shared_storage.size_in_bytes()", self.shared_storage.size_in_bytes())
@@ -2395,62 +2362,63 @@ class FlashAttentionBackwardSm100:
                         producer_state_dS=producer_state_dS
                     )
 
-            if not zero_block:
-                if const_expr(not self.use_tma_store):
-                    consumer_state_dKV = self.epilogue_dKV(
-                        dp_idx,
-                        warp_idx,
-                        batch_idx,
-                        head_idx,
-                        n_block,
-                        thr_mma_dV,
-                        thr_mma_dK,
-                        tdVtdV,
-                        tdKtdK,
-                        mdV,
-                        mdK,
-                        pipeline_dKV,
-                        consumer_state_dKV,
-                        softmax_scale,
-                    )
-                else:
-                    thr_copy_r2s_dKV = tiled_copy_r2s_dKV.get_slice(dp_idx)
-                    #### STORE dV
-                    consumer_state_dKV = self.epilogue_dK_or_dV_tma(
-                        dp_idx,
-                        batch_idx,
-                        head_idx,
-                        n_block,
-                        thr_mma_dV,
-                        tdVtdV,
-                        mdV_tma_tensor,
-                        sdV,
-                        tma_atom_dV,
-                        thr_copy_r2s_dKV,
-                        pipeline_dKV,
-                        consumer_state_dKV,
-                        None,  # Don't scale
-                        int(NamedBarrierBwdSm100.EpilogueWG1),  # barrier_id
-                        mdV_semaphore,
-                    )
-                    #### STORE dK
-                    consumer_state_dKV = self.epilogue_dK_or_dV_tma(
-                        dp_idx,
-                        batch_idx,
-                        head_idx,
-                        n_block,
-                        thr_mma_dK,
-                        tdKtdK,
-                        mdK_tma_tensor,
-                        sdK,
-                        tma_atom_dK,
-                        thr_copy_r2s_dKV,
-                        pipeline_dKV,
-                        consumer_state_dKV,
-                        softmax_scale if const_expr(self.qhead_per_kvhead == 1) else None,
-                        int(NamedBarrierBwdSm100.EpilogueWG1),  # barrier_id
-                        mdK_semaphore,
-                    )
+            if const_expr(not self.use_tma_store):
+                consumer_state_dKV = self.epilogue_dKV(
+                    dp_idx,
+                    warp_idx,
+                    batch_idx,
+                    head_idx,
+                    n_block,
+                    thr_mma_dV,
+                    thr_mma_dK,
+                    tdVtdV,
+                    tdKtdK,
+                    mdV,
+                    mdK,
+                    pipeline_dKV,
+                    consumer_state_dKV,
+                    softmax_scale,
+                )
+            else:
+                thr_copy_r2s_dKV = tiled_copy_r2s_dKV.get_slice(dp_idx)
+                #### STORE dV
+                consumer_state_dKV = self.epilogue_dK_or_dV_tma(
+                    dp_idx,
+                    batch_idx,
+                    head_idx,
+                    n_block,
+                    thr_mma_dV,
+                    tdVtdV,
+                    mdV_tma_tensor,
+                    sdV,
+                    tma_atom_dV,
+                    thr_copy_r2s_dKV,
+                    pipeline_dKV,
+                    consumer_state_dKV,
+                    None,  # Don't scale
+                    int(NamedBarrierBwdSm100.EpilogueWG1),  # barrier_id
+                    mdV_semaphore,
+                    zero_block,
+                )
+                #### STORE dK
+                consumer_state_dKV = self.epilogue_dK_or_dV_tma(
+                    dp_idx,
+                    batch_idx,
+                    head_idx,
+                    n_block,
+                    thr_mma_dK,
+                    tdKtdK,
+                    mdK_tma_tensor,
+                    sdK,
+                    tma_atom_dK,
+                    thr_copy_r2s_dKV,
+                    pipeline_dKV,
+                    consumer_state_dKV,
+                    softmax_scale if const_expr(self.qhead_per_kvhead == 1) else None,
+                    int(NamedBarrierBwdSm100.EpilogueWG1),  # barrier_id
+                    mdK_semaphore,
+                    zero_block,
+                )
             if const_expr(self.enable_flashmask):
                 flashmask_phase ^= 1
 
@@ -3097,6 +3065,7 @@ class FlashAttentionBackwardSm100:
         scale: Optional[Float32],
         barrier_id: Int32,
         mdKV_semaphore: Optional[cute.Tensor],
+        zero_block: bool,
     ) -> cutlass.pipeline.PipelineState:
         # assumes mma_tiler_pdo = mma_tiler_dsq = (tile_n, head_dim)
         # head_dim = head_dim_v, dk_dtype = dv_dtype
@@ -3160,7 +3129,8 @@ class FlashAttentionBackwardSm100:
 
         read_flag = const_expr(not deterministic_KV)
 
-        pipeline_dKV.consumer_wait(consumer_state_dKV)
+        if not zero_block:
+            pipeline_dKV.consumer_wait(consumer_state_dKV)
 
         # semaphore acquire
         if const_expr(deterministic_KV):
@@ -3190,9 +3160,12 @@ class FlashAttentionBackwardSm100:
                 "RMEM<->TMEM fragment size mismatch"
             )
 
-            # TMEM -> RMEM -- copy and fence
-            cute.copy(thr_copy_t2r, tdKVtdKV_t2r, tdKVrdKV_t2r)
-            cute.arch.fence_view_async_tmem_load()
+            if not zero_block:
+                # TMEM -> RMEM -- copy and fence
+                cute.copy(thr_copy_t2r, tdKVtdKV_t2r, tdKVrdKV_t2r)
+                cute.arch.fence_view_async_tmem_load()
+            else:
+                tdKVrdKV_t2r.fill(0.0)
 
             # RMEM -- scale and convert
             if const_expr(scale is not None):
@@ -3247,7 +3220,8 @@ class FlashAttentionBackwardSm100:
             barrier.arrive_inc(mdKV_semaphore_cur.iterator, tidx, wg_idx, 1)
 
         cute.arch.sync_warp()
-        with cute.arch.elect_one():
-            pipeline_dKV.consumer_release(consumer_state_dKV)
-        consumer_state_dKV.advance()
+        if not zero_block:
+            with cute.arch.elect_one():
+                pipeline_dKV.consumer_release(consumer_state_dKV)
+            consumer_state_dKV.advance()
         return consumer_state_dKV
