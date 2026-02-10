@@ -1531,6 +1531,7 @@ class FlashAttentionForwardSm100:
         bidb,
         bidh,
         n_block,
+        encode_n_block,
         num_heads, # num_query_heads
         load_startend_row_indices_producer_state: cutlass.pipeline.PipelineState,
         s_startend_row_indices: cute.Tensor,
@@ -1538,12 +1539,15 @@ class FlashAttentionForwardSm100:
         mbar_ptr: cute.Pointer,
     ) -> Tuple[cutlass.pipeline.PipelineState]:
 
-        num_load_threads = len(self.load_warp_ids) * cute.arch.WARP_SIZE
+        # Note(umiswing): encode_n_block >= 0 means partially masked
+        if encode_n_block >= 0:
+            num_load_threads = len(self.load_warp_ids) * cute.arch.WARP_SIZE
 
-        # TODO(wusiming): this might cause hazard: write mask of a new n_block to the smem for softmax_wg0 while softmax_wg1 is still readding the same smem for mask of the old n_block, though idk why test pass
-        # TODO(wusiming): could be faster if we skip redundant load for the same n_block
-        for softmax_wg in cutlass.range_constexpr(2):
-            cute.arch.mbarrier_wait(mbar_ptr + self.mbar_load_startend_row_indices_empty_offset + softmax_wg * self.kv_stage + load_startend_row_indices_producer_state.index, load_startend_row_indices_producer_state.phase)
+            # Note(umiswing): we need separate mbarrier for softmax0 and softmax1 since there are
+            # dependency between mma, softmax0 and softmax1, if we use the same mbarrier for
+            # load_fm, softmax0 and softmax1, softmax0 and softmax1 will deadlock
+            cute.arch.mbarrier_wait(mbar_ptr + self.mbar_load_startend_row_indices_empty_offset + load_startend_row_indices_producer_state.index, load_startend_row_indices_producer_state.phase)
+            cute.arch.mbarrier_wait(mbar_ptr + self.mbar_load_startend_row_indices_empty_offset + self.kv_stage + load_startend_row_indices_producer_state.index, load_startend_row_indices_producer_state.phase)
 
             s_startend_row_indices_cur_stage = cute.make_tensor(s_startend_row_indices.iterator + load_startend_row_indices_producer_state.index * 4 * self.n_block_size, cute.make_layout(4 * self.n_block_size))
             # TODO(wusiming): use cp.async for less reg use
@@ -1585,9 +1589,10 @@ class FlashAttentionForwardSm100:
                     # lts
                     s_startend_row_indices_cur_stage[idx] = flashmask_info.startend_row_indices[bidb, fm_head_idx, nb_mul_kBN + idx, 0]
                     idx += num_load_threads
-            cute.arch.mbarrier_arrive(mbar_ptr + self.mbar_load_startend_row_indices_full_offset + softmax_wg * self.kv_stage + load_startend_row_indices_producer_state.index)
+            cute.arch.mbarrier_arrive(mbar_ptr + self.mbar_load_startend_row_indices_full_offset + load_startend_row_indices_producer_state.index)
+            cute.arch.mbarrier_arrive(mbar_ptr + self.mbar_load_startend_row_indices_full_offset + self.kv_stage + load_startend_row_indices_producer_state.index)
 
-        load_startend_row_indices_producer_state.advance()
+            load_startend_row_indices_producer_state.advance()
 
         return load_startend_row_indices_producer_state
 
@@ -1789,6 +1794,7 @@ class FlashAttentionForwardSm100:
 
                     s_extra_flags_cur_stage = cute.make_tensor(s_extra_flags.iterator + generate_block_consumer_state.index, cute.make_layout(1))
                     n_block_first = self.n_block_getter(s_n_block_cur_stage, s_extra_flags_cur_stage, n_block_idx)
+                    encode_n_block = self.mask_n_block_getter(s_n_block_cur_stage, n_block_idx)
                     n_block_idx += 1
 
                     # Note(wusiming): generate_block make sure n_block_first won't be self.generate_block_incomplete
@@ -1821,6 +1827,7 @@ class FlashAttentionForwardSm100:
                             batch_idx,
                             head_idx,
                             n_block_first,
+                            encode_n_block,
                             mQ.shape[2], # (s_q, d, h, b) or (total_q, d, h) if there is cu_seqlens_q
                             load_startend_row_indices_producer_state,
                             s_startend_row_indices,
@@ -1829,6 +1836,7 @@ class FlashAttentionForwardSm100:
                         )
 
                         n_block = self.n_block_getter(s_n_block_cur_stage, s_extra_flags_cur_stage, n_block_idx)
+                        encode_n_block = self.mask_n_block_getter(s_n_block_cur_stage, n_block_idx)
                         n_block_idx += 1
                         while n_block >= n_block_min or n_block == Int32(self.generate_block_incomplete):
                             while n_block >= n_block_min:
@@ -1849,6 +1857,7 @@ class FlashAttentionForwardSm100:
                                     batch_idx,
                                     head_idx,
                                     n_block,
+                                    encode_n_block,
                                     mQ.shape[2], # (s_q, d, h, b) or (total_q, d, h) if there is cu_seqlens_q
                                     load_startend_row_indices_producer_state,
                                     s_startend_row_indices,
@@ -1857,6 +1866,7 @@ class FlashAttentionForwardSm100:
                                 )
 
                                 n_block = self.n_block_getter(s_n_block_cur_stage, s_extra_flags_cur_stage, n_block_idx)
+                                encode_n_block = self.mask_n_block_getter(s_n_block_cur_stage, n_block_idx)
                                 n_block_idx += 1
 
                             if n_block == Int32(self.generate_block_incomplete):
@@ -1875,6 +1885,7 @@ class FlashAttentionForwardSm100:
                                                           )
                                 n_block_idx = 0
                                 n_block = self.n_block_getter(s_n_block_cur_stage, s_extra_flags_cur_stage, n_block_idx)
+                                encode_n_block = self.mask_n_block_getter(s_n_block_cur_stage, n_block_idx)
                                 n_block_idx += 1
 
                         cute.arch.mbarrier_arrive(mbar_ptr + self.mbar_generate_block_empty_offset + generate_block_consumer_state.index)
