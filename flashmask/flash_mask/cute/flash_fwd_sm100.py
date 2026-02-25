@@ -1286,6 +1286,8 @@ class FlashAttentionForwardSm100:
                 # num_blocks = Int32(Int32((seqlen.seqlen_k + self.n_block_size - 1) // self.n_block_size + 3) & 0xfffffffc) # Note(wusiming): padding for int4 load
                 # TODO(wusiming): support 128 padding
                 num_blocks = Int32((seqlen.seqlen_k + self.n_block_size - 1) // self.n_block_size)
+                # Note(wusiming): in fm's case, n_block_min is always 0, but it should be better to cal it with n_block_max - n_block_min
+                num_blocks = ((n_block_max) + 31) & ~31
 
                 num_chunks = (num_blocks + self.generate_block_buffer_usable_block_count - 1) // self.generate_block_buffer_usable_block_count
                 # reverse_chunk_idx, start from right to left: [5, 4, 3, 2, 1, 0], and fwd kernel scans from right to left
@@ -1498,20 +1500,21 @@ class FlashAttentionForwardSm100:
             warp_id = tidx >> 5
             lane_id = tidx & 31
             # warp-wide prefix-sum
-            prefix_sum = self.prefix_sum_kernel(prefix_sum) 
+            if cute.arch.vote_any_sync(prefix_sum):
+                prefix_sum = self.prefix_sum_kernel(prefix_sum) 
 
-            if not fully_masked:
-                # TODO(wusiming): not sure if cutlass.Int32 keep the same format as cpp
-                s_n_block[valid_n_block_num + prefix_sum - 1] = n_block if partially_masked else (-n_block - 1)
+                if not fully_masked:
+                    # TODO(wusiming): not sure if cutlass.Int32 keep the same format as cpp
+                    s_n_block[valid_n_block_num + prefix_sum - 1] = n_block if partially_masked else (-n_block - 1)
 
-            # Note(wusiming): i don't think we need to specify mask_and_clamp
-            # prefix_sum = cute.arch.shuffle_sync_op(
-            #     prefix_sum + (Int32(0) if fully_masked else Int32(1)), 31, 0xffffffff)
+                # Note(wusiming): i don't think we need to specify mask_and_clamp
+                # prefix_sum = cute.arch.shuffle_sync_op(
+                #     prefix_sum + (Int32(0) if fully_masked else Int32(1)), 31, 0xffffffff)
 
-            prefix_sum = cute.arch.shuffle_sync_op(
-                prefix_sum, 31, 0xffffffff)
+                prefix_sum = cute.arch.shuffle_sync_op(
+                    prefix_sum, 31, 0xffffffff)
 
-            valid_n_block_num += prefix_sum
+                valid_n_block_num += prefix_sum
 
             s_idx -= num_generate_block_threads
             n_block -= num_generate_block_threads
