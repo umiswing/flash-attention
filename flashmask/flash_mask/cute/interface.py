@@ -741,9 +741,9 @@ def _flash_attn_bwd(
 
     place = q.place
     # TODO: check if this is the right rounding
-    dq = paddle.zeros_like(q)
-    dk = paddle.zeros_like(k)
-    dv = paddle.zeros_like(v)
+    dq = paddle.empty_like(q)
+    dk = paddle.empty_like(k)
+    dv = paddle.empty_like(v)
 
     # Round head_dim to multiple of 64 for SM100 to ensure tiled_copy_2d compatibility
     # in postprocess (128 threads must divide tile_hdim/copy_elems evenly)

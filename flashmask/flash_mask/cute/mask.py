@@ -461,13 +461,12 @@ class AttentionMask:
                     )
 
         if const_expr(enable_flashmask):
-
-            # Note(wusiming): compute mbar_ptr in softmax_loop
-            cute.arch.mbarrier_wait(
-                mbar_ptr + mbar_load_startend_row_indices_full_offset + stage * kv_stage + load_startend_row_indices_consumer_state.index,
-                load_startend_row_indices_consumer_state.phase)
-
             if n_block_idx < generate_block_buffer_usable_block_count and encode_n_block >= 0:
+                # Note(wusiming): compute mbar_ptr in softmax_loop
+                cute.arch.mbarrier_wait(
+                    mbar_ptr + mbar_load_startend_row_indices_full_offset + stage * kv_stage + load_startend_row_indices_consumer_state.index,
+                    load_startend_row_indices_consumer_state.phase)
+
                 if const_expr(has_ut_start):
                     for i in cutlass.range(cute.size(tScS_t2r.shape), unroll_full=True):
                         lts = s_startend_row_indices[load_startend_row_indices_consumer_state.index * 4 * self.tile_n + tScS_t2r[i][1]] - m_block * self.tile_m
@@ -494,9 +493,9 @@ class AttentionMask:
                         if tScS_t2r[i][0] >= lts:
                             acc_S[i] = -cutlass.Float32.inf
 
-            cute.arch.mbarrier_arrive(
-                mbar_ptr + mbar_load_startend_row_indices_empty_offset + stage * kv_stage + load_startend_row_indices_consumer_state.index)
-            load_startend_row_indices_consumer_state.advance()
+                cute.arch.mbarrier_arrive(
+                    mbar_ptr + mbar_load_startend_row_indices_empty_offset + stage * kv_stage + load_startend_row_indices_consumer_state.index)
+                load_startend_row_indices_consumer_state.advance()
         return load_startend_row_indices_consumer_state
 
     @cute.jit
