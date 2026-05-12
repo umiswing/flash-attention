@@ -220,22 +220,22 @@ def _convert_to_varlen_bound2(
         "causal": varlen_causal,
     }
 
-    # Add output_to_padded if Q padding exists
-    if needs_q_padding:
-        _b, _sq = b, sq
-        _q_padding_starts = q_padding_starts
+    # # Add output_to_padded if Q padding exists
+    # if needs_q_padding:
+    #     _b, _sq = b, sq
+    #     _q_padding_starts = q_padding_starts
 
-        def output_to_padded(out_varlen_pt):
-            nh = out_varlen_pt.shape[1]
-            dv_out = out_varlen_pt.shape[2]
-            out_padded = out_varlen_pt.reshape([_b, _sq, nh, dv_out])
-            for bi_inner in range(_b):
-                q_end = _q_padding_starts[bi_inner]
-                if q_end < _sq:
-                    out_padded[bi_inner, q_end:, :, :] = 0
-            return out_padded
+    #     def output_to_padded(out_varlen_pt):
+    #         nh = out_varlen_pt.shape[1]
+    #         dv_out = out_varlen_pt.shape[2]
+    #         out_padded = out_varlen_pt.reshape([_b, _sq, nh, dv_out])
+    #         for bi_inner in range(_b):
+    #             q_end = _q_padding_starts[bi_inner]
+    #             if q_end < _sq:
+    #                 out_padded[bi_inner, q_end:, :, :] = 0
+    #         return out_padded
 
-        result["output_to_padded"] = output_to_padded
+    #     result["output_to_padded"] = output_to_padded
 
     return result
 
@@ -412,6 +412,9 @@ def flashmask_attention(
             value=value,
             startend_row_indices=startend_row_indices,
             causal=causal)
+
+        print(f"wsm debug cu_seqlens_q: {varlen_args['cu_seqlens_q']}")
+        print(f"wsm debug cu_seqlens_k: {varlen_args['cu_seqlens_k']}")
 
         out, lse = flash_attn_varlen_func(
             q=varlen_args["q"],

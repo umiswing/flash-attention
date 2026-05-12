@@ -404,7 +404,10 @@ def _flash_attn_fwd(
     requires_grad = not q.stop_gradient or not k.stop_gradient or not v.stop_gradient
 
     if out is None:
-        out = paddle.empty(q_batch_seqlen_shape + [num_head, head_dim_v], dtype=out_paddle_dtype)
+        if arch // 10 == 10 and head_dim == 256 and head_dim_v == 256:
+            out = paddle.zeros(q_batch_seqlen_shape + [num_head, head_dim_v], dtype=out_paddle_dtype)
+        else:
+            out = paddle.empty(q_batch_seqlen_shape + [num_head, head_dim_v], dtype=out_paddle_dtype)
     else:
         _validate_tensor(out, "out", q_batch_seqlen_shape + [num_head, head_dim_v], out_paddle_dtype, place)
 
@@ -1173,7 +1176,10 @@ def _flash_attn_bwd(
     out_paddle_dtype = q.dtype
 
     if dq is None:
-        dq = paddle.empty_like(q)
+        if use_dedicated_hd256_kernel:
+            dq = paddle.zeros_like(q)
+        else:
+            dq = paddle.empty_like(q)
     else:
         _validate_tensor(dq, "dq", q.shape, out_paddle_dtype, place)
 

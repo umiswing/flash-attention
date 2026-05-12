@@ -856,30 +856,19 @@ class BlackwellFusedMultiHeadAttentionForward:
                         )
                     )
                     seqlen_kv_loop_end = seqlen_kv_loop_start + seqlen_kv_loop_steps
-                    # Q
-                    for iter in cutlass.range(self.iterations_qk, unroll=1):
-                        q_handle = load_q_producer.acquire_and_advance()
-                        cute.copy(
-                            tma_atom_q,
-                            tQgQ[None, iter],
-                            tQsQ[None, q_handle.index],
-                            tma_bar_ptr=q_handle.barrier,
-                        )
+                    if seqlen_kv_loop_steps > 0:
+                        # Q
+                        for iter in cutlass.range(self.iterations_qk, unroll=1):
+                            q_handle = load_q_producer.acquire_and_advance()
+                            cute.copy(
+                                tma_atom_q,
+                                tQgQ[None, iter],
+                                tQsQ[None, q_handle.index],
+                                tma_bar_ptr=q_handle.barrier,
+                            )
 
-                    # K0
-                    kv_coord = seqlen_kv_loop_start
-                    for iter in cutlass.range(self.iterations_qk, unroll=1):
-                        k_handle = load_kv_producer.acquire_and_advance()
-                        cute.copy(
-                            tma_atom_k,
-                            tKgK[None, kv_coord, iter],
-                            tKsK[None, k_handle.index],
-                            tma_bar_ptr=k_handle.barrier,
-                        )
-                    kv_coord += 1
-
-                    for i in cutlass.range(1, seqlen_kv_loop_steps, 1, unroll=1):
-                        # Ki
+                        # K0
+                        kv_coord = seqlen_kv_loop_start
                         for iter in cutlass.range(self.iterations_qk, unroll=1):
                             k_handle = load_kv_producer.acquire_and_advance()
                             cute.copy(
@@ -888,25 +877,37 @@ class BlackwellFusedMultiHeadAttentionForward:
                                 tKsK[None, k_handle.index],
                                 tma_bar_ptr=k_handle.barrier,
                             )
-                        # Vi-1
+                        kv_coord += 1
+
+                        for i in cutlass.range(1, seqlen_kv_loop_steps, 1, unroll=1):
+                            # Ki
+                            for iter in cutlass.range(self.iterations_qk, unroll=1):
+                                k_handle = load_kv_producer.acquire_and_advance()
+                                cute.copy(
+                                    tma_atom_k,
+                                    tKgK[None, kv_coord, iter],
+                                    tKsK[None, k_handle.index],
+                                    tma_bar_ptr=k_handle.barrier,
+                                )
+                            # Vi-1
+                            for iter in cutlass.range(self.iterations_pv, unroll=1):
+                                v_handle = load_kv_producer.acquire_and_advance()
+                                cute.copy(
+                                    tma_atom_v,
+                                    tVgV[None, iter, kv_coord - 1],
+                                    tVsV[None, v_handle.index],
+                                    tma_bar_ptr=v_handle.barrier,
+                                )
+                            kv_coord += 1
+                        # Vend
                         for iter in cutlass.range(self.iterations_pv, unroll=1):
                             v_handle = load_kv_producer.acquire_and_advance()
                             cute.copy(
                                 tma_atom_v,
-                                tVgV[None, iter, kv_coord - 1],
+                                tVgV[None, iter, seqlen_kv_loop_end - 1],
                                 tVsV[None, v_handle.index],
                                 tma_bar_ptr=v_handle.barrier,
                             )
-                        kv_coord += 1
-                    # Vend
-                    for iter in cutlass.range(self.iterations_pv, unroll=1):
-                        v_handle = load_kv_producer.acquire_and_advance()
-                        cute.copy(
-                            tma_atom_v,
-                            tVgV[None, iter, seqlen_kv_loop_end - 1],
-                            tVsV[None, v_handle.index],
-                            tma_bar_ptr=v_handle.barrier,
-                        )
 
                 work_tile = tile_sched.advance_to_next_work()
                 # End of persistent scheduler loop
@@ -958,39 +959,95 @@ class BlackwellFusedMultiHeadAttentionForward:
                     )
                     seqlen_kv_loop_end = seqlen_kv_loop_start + seqlen_kv_loop_steps
 
-                    cta_rank_in_cluster = cute.arch.make_warp_uniform(
-                        cute.arch.block_idx_in_cluster()
-                    )
-                    is_leader_cta = cta_rank_in_cluster % 2 == 0
-                    load_q_releaser = load_q_consumer.clone()
-                    pv_tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
-                    if seqlen_kv_loop_steps > 1:
-                        # QK0
-                        if is_leader_cta:
-                            s_handle = mma_s_producer.acquire_and_advance()
-                            tStS_slice = tStS[None, None, None, s_handle.index]
-                            qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
-                            for iter in cutlass.range(self.iterations_qk, unroll=1):
-                                load_q_consumer.wait_and_advance()
-                                tSrQ_slice = tSrQ[None, None, None, iter]
-                                k_handle = load_kv_consumer.wait_and_advance()
-                                tSrK_trans_slice = tSrK[None, None, None, k_handle.index]
-                                num_kphases = cute.size(tSrQ_slice, mode=[2])
-                                for kphase_idx in cutlass.range(num_kphases, unroll_full=True):
-                                    kphase_coord = (None, None, kphase_idx)
-                                    cute.gemm(
-                                        qk_tiled_mma,
-                                        tStS_slice,
-                                        tSrQ_slice[kphase_coord],
-                                        tSrK_trans_slice[kphase_coord],
-                                        tStS_slice,
-                                    )
-                                    qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
-                                k_handle.release()
-                            s_handle.commit()
-                        for i in cutlass.range(1, seqlen_kv_loop_steps - 1, 1, unroll=1):
-                            # QKi
+                    if seqlen_kv_loop_steps > 0:
+                        cta_rank_in_cluster = cute.arch.make_warp_uniform(
+                            cute.arch.block_idx_in_cluster()
+                        )
+                        is_leader_cta = cta_rank_in_cluster % 2 == 0
+                        load_q_releaser = load_q_consumer.clone()
+                        pv_tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
+                        if seqlen_kv_loop_steps > 1:
+                            # QK0
                             if is_leader_cta:
+                                s_handle = mma_s_producer.acquire_and_advance()
+                                tStS_slice = tStS[None, None, None, s_handle.index]
+                                qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
+                                for iter in cutlass.range(self.iterations_qk, unroll=1):
+                                    load_q_consumer.wait_and_advance()
+                                    tSrQ_slice = tSrQ[None, None, None, iter]
+                                    k_handle = load_kv_consumer.wait_and_advance()
+                                    tSrK_trans_slice = tSrK[None, None, None, k_handle.index]
+                                    num_kphases = cute.size(tSrQ_slice, mode=[2])
+                                    for kphase_idx in cutlass.range(num_kphases, unroll_full=True):
+                                        kphase_coord = (None, None, kphase_idx)
+                                        cute.gemm(
+                                            qk_tiled_mma,
+                                            tStS_slice,
+                                            tSrQ_slice[kphase_coord],
+                                            tSrK_trans_slice[kphase_coord],
+                                            tStS_slice,
+                                        )
+                                        qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
+                                    k_handle.release()
+                                s_handle.commit()
+                            for i in cutlass.range(1, seqlen_kv_loop_steps - 1, 1, unroll=1):
+                                # QKi
+                                if is_leader_cta:
+                                    s_handle = mma_s_producer.acquire_and_advance()
+                                    tStS_slice = tStS[None, None, None, s_handle.index]
+                                    qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
+                                    for iter in cutlass.range(self.iterations_qk, unroll=1):
+                                        tSrQ_slice = tSrQ[None, None, None, iter]
+                                        k_handle = load_kv_consumer.wait_and_advance()
+                                        tSrK_trans_slice = tSrK[None, None, None, k_handle.index]
+                                        num_kphases = cute.size(tSrQ_slice, mode=[2])
+                                        for kphase_idx in cutlass.range(num_kphases, unroll_full=True):
+                                            kphase_coord = (None, None, kphase_idx)
+                                            cute.gemm(
+                                                qk_tiled_mma,
+                                                tStS_slice,
+                                                tSrQ_slice[kphase_coord],
+                                                tSrK_trans_slice[kphase_coord],
+                                                tStS_slice,
+                                            )
+                                            qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
+                                        k_handle.release()
+                                    s_handle.commit()
+    
+                                    # PVi-1
+                                    p_handle = p_mma_consumer.wait_and_advance()
+                                    o_handle = mma_corr_producer.acquire_and_advance()
+                                    pv_whether_acc = pv_tiled_mma.get(tcgen05.Field.ACCUMULATE)
+                                    for iter in cutlass.range(self.iterations_pv, unroll=1):
+                                        v_handle = load_kv_consumer.wait_and_advance()
+                                        pv_tiled_mma.set(tcgen05.Field.ACCUMULATE, pv_whether_acc)
+                                        tOtO_slice = tOtO_staged[None, None, None, iter]
+                                        tStS_slice = tStS[None, None, None, p_handle.index]
+                                        tP = cute.make_tensor(
+                                            tStS_slice.iterator, p_tmem_layout_staged.outer
+                                        )
+                                        tOrP = pv_thr_mma.make_fragment_A(tP)
+                                        tOrP_slice = cute.make_tensor(
+                                            cute.recast_ptr(tStS_slice.iterator, dtype=self.q_dtype),
+                                            tOrP.layout,
+                                        )
+                                        tOrV_slice = tOrV[None, None, None, v_handle.index]
+                                        num_kphases = cute.size(tOrV_slice, mode=[2])
+                                        for kphase_idx in cutlass.range(num_kphases, unroll_full=True):
+                                            kphase_coord = (None, None, kphase_idx)
+                                            cute.gemm(
+                                                pv_tiled_mma,
+                                                tOtO_slice,
+                                                tOrP_slice[kphase_coord],
+                                                tOrV_slice[kphase_coord],
+                                                tOtO_slice,
+                                            )
+                                            pv_tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
+                                        v_handle.release()
+                                    o_handle.commit()
+                                    p_handle.release()
+                            if is_leader_cta:
+                                # QKend
                                 s_handle = mma_s_producer.acquire_and_advance()
                                 tStS_slice = tStS[None, None, None, s_handle.index]
                                 qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
@@ -1010,9 +1067,11 @@ class BlackwellFusedMultiHeadAttentionForward:
                                         )
                                         qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
                                     k_handle.release()
+                                    load_q_releaser.release()
+                                    load_q_releaser.advance()
                                 s_handle.commit()
-
-                                # PVi-1
+    
+                                # PVend-1
                                 p_handle = p_mma_consumer.wait_and_advance()
                                 o_handle = mma_corr_producer.acquire_and_advance()
                                 pv_whether_acc = pv_tiled_mma.get(tcgen05.Field.ACCUMULATE)
@@ -1044,32 +1103,35 @@ class BlackwellFusedMultiHeadAttentionForward:
                                     v_handle.release()
                                 o_handle.commit()
                                 p_handle.release()
+                        else:
+                            if is_leader_cta:
+                                # QK0
+                                s_handle = mma_s_producer.acquire_and_advance()
+                                tStS_slice = tStS[None, None, None, s_handle.index]
+                                qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
+                                for iter in cutlass.range(self.iterations_qk, unroll=1):
+                                    load_q_consumer.wait_and_advance()
+                                    tSrQ_slice = tSrQ[None, None, None, iter]
+                                    k_handle = load_kv_consumer.wait_and_advance()
+                                    tSrK_trans_slice = tSrK[None, None, None, k_handle.index]
+                                    num_kphases = cute.size(tSrQ_slice, mode=[2])
+                                    for kphase_idx in cutlass.range(num_kphases, unroll_full=True):
+                                        kphase_coord = (None, None, kphase_idx)
+                                        cute.gemm(
+                                            qk_tiled_mma,
+                                            tStS_slice,
+                                            tSrQ_slice[kphase_coord],
+                                            tSrK_trans_slice[kphase_coord],
+                                            tStS_slice,
+                                        )
+                                        qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
+                                    k_handle.release()
+                                    load_q_releaser.release()
+                                    load_q_releaser.advance()
+                                s_handle.commit()
+    
                         if is_leader_cta:
-                            # QKend
-                            s_handle = mma_s_producer.acquire_and_advance()
-                            tStS_slice = tStS[None, None, None, s_handle.index]
-                            qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
-                            for iter in cutlass.range(self.iterations_qk, unroll=1):
-                                tSrQ_slice = tSrQ[None, None, None, iter]
-                                k_handle = load_kv_consumer.wait_and_advance()
-                                tSrK_trans_slice = tSrK[None, None, None, k_handle.index]
-                                num_kphases = cute.size(tSrQ_slice, mode=[2])
-                                for kphase_idx in cutlass.range(num_kphases, unroll_full=True):
-                                    kphase_coord = (None, None, kphase_idx)
-                                    cute.gemm(
-                                        qk_tiled_mma,
-                                        tStS_slice,
-                                        tSrQ_slice[kphase_coord],
-                                        tSrK_trans_slice[kphase_coord],
-                                        tStS_slice,
-                                    )
-                                    qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
-                                k_handle.release()
-                                load_q_releaser.release()
-                                load_q_releaser.advance()
-                            s_handle.commit()
-
-                            # PVend-1
+                            # PVend
                             p_handle = p_mma_consumer.wait_and_advance()
                             o_handle = mma_corr_producer.acquire_and_advance()
                             pv_whether_acc = pv_tiled_mma.get(tcgen05.Field.ACCUMULATE)
@@ -1078,9 +1140,7 @@ class BlackwellFusedMultiHeadAttentionForward:
                                 pv_tiled_mma.set(tcgen05.Field.ACCUMULATE, pv_whether_acc)
                                 tOtO_slice = tOtO_staged[None, None, None, iter]
                                 tStS_slice = tStS[None, None, None, p_handle.index]
-                                tP = cute.make_tensor(
-                                    tStS_slice.iterator, p_tmem_layout_staged.outer
-                                )
+                                tP = cute.make_tensor(tStS_slice.iterator, p_tmem_layout_staged.outer)
                                 tOrP = pv_thr_mma.make_fragment_A(tP)
                                 tOrP_slice = cute.make_tensor(
                                     cute.recast_ptr(tStS_slice.iterator, dtype=self.q_dtype),
@@ -1101,64 +1161,6 @@ class BlackwellFusedMultiHeadAttentionForward:
                                 v_handle.release()
                             o_handle.commit()
                             p_handle.release()
-                    else:
-                        if is_leader_cta:
-                            # QK0
-                            s_handle = mma_s_producer.acquire_and_advance()
-                            tStS_slice = tStS[None, None, None, s_handle.index]
-                            qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
-                            for iter in cutlass.range(self.iterations_qk, unroll=1):
-                                load_q_consumer.wait_and_advance()
-                                tSrQ_slice = tSrQ[None, None, None, iter]
-                                k_handle = load_kv_consumer.wait_and_advance()
-                                tSrK_trans_slice = tSrK[None, None, None, k_handle.index]
-                                num_kphases = cute.size(tSrQ_slice, mode=[2])
-                                for kphase_idx in cutlass.range(num_kphases, unroll_full=True):
-                                    kphase_coord = (None, None, kphase_idx)
-                                    cute.gemm(
-                                        qk_tiled_mma,
-                                        tStS_slice,
-                                        tSrQ_slice[kphase_coord],
-                                        tSrK_trans_slice[kphase_coord],
-                                        tStS_slice,
-                                    )
-                                    qk_tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
-                                k_handle.release()
-                                load_q_releaser.release()
-                                load_q_releaser.advance()
-                            s_handle.commit()
-
-                    if is_leader_cta:
-                        # PVend
-                        p_handle = p_mma_consumer.wait_and_advance()
-                        o_handle = mma_corr_producer.acquire_and_advance()
-                        pv_whether_acc = pv_tiled_mma.get(tcgen05.Field.ACCUMULATE)
-                        for iter in cutlass.range(self.iterations_pv, unroll=1):
-                            v_handle = load_kv_consumer.wait_and_advance()
-                            pv_tiled_mma.set(tcgen05.Field.ACCUMULATE, pv_whether_acc)
-                            tOtO_slice = tOtO_staged[None, None, None, iter]
-                            tStS_slice = tStS[None, None, None, p_handle.index]
-                            tP = cute.make_tensor(tStS_slice.iterator, p_tmem_layout_staged.outer)
-                            tOrP = pv_thr_mma.make_fragment_A(tP)
-                            tOrP_slice = cute.make_tensor(
-                                cute.recast_ptr(tStS_slice.iterator, dtype=self.q_dtype),
-                                tOrP.layout,
-                            )
-                            tOrV_slice = tOrV[None, None, None, v_handle.index]
-                            num_kphases = cute.size(tOrV_slice, mode=[2])
-                            for kphase_idx in cutlass.range(num_kphases, unroll_full=True):
-                                kphase_coord = (None, None, kphase_idx)
-                                cute.gemm(
-                                    pv_tiled_mma,
-                                    tOtO_slice,
-                                    tOrP_slice[kphase_coord],
-                                    tOrV_slice[kphase_coord],
-                                    tOtO_slice,
-                                )
-                                pv_tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
-                            v_handle.release()
-                        o_handle.commit()
-                        p_handle.release()
                 work_tile = tile_sched.advance_to_next_work()
             # End of persistent scheduler loop
             mma_s_producer.tail()
@@ -1208,68 +1210,69 @@ class BlackwellFusedMultiHeadAttentionForward:
                         window_size_right,
                     )
                     end_count = start_count + trip_count
-                    if cutlass.const_expr(self.use_semantic_trip_range):
-                        n_block_min_causal_local_mask, n_block_min_before_local_mask = (
-                            FusedMask.get_trip_mask_bounds_via_block_info(
-                                mma_block_coord,
-                                self.qk_mma_tiler,
-                                seqlen_q,
-                                seqlen_k,
-                                self.is_causal,
-                                self.is_local,
-                                window_size_left,
-                                window_size_right,
-                            )
-                        )
-                    cS_base = cute.make_identity_tensor(
-                        (self.qk_mma_tiler[0], self.qk_mma_tiler[1])
-                    )
-                    cS = cute.domain_offset((mma_block_coord[0] * self.qk_mma_tiler[0], 0), cS_base)
-                    tScS = qk_thr_mma.partition_C(cS)
-
-                    for step in cutlass.range(start_count, end_count, 1, unroll=1):
-                        cS_iter = cute.domain_offset((0, step * self.qk_mma_tiler[1]), cS)
-                        tScS_iter = qk_thr_mma.partition_C(cS_iter)
+                    if trip_count > 0:
                         if cutlass.const_expr(self.use_semantic_trip_range):
-                            need_apply_mask = (
-                                step >= n_block_min_causal_local_mask
-                                or step < n_block_min_before_local_mask
+                            n_block_min_causal_local_mask, n_block_min_before_local_mask = (
+                                FusedMask.get_trip_mask_bounds_via_block_info(
+                                    mma_block_coord,
+                                    self.qk_mma_tiler,
+                                    seqlen_q,
+                                    seqlen_k,
+                                    self.is_causal,
+                                    self.is_local,
+                                    window_size_left,
+                                    window_size_right,
+                                )
                             )
-                        else:
-                            # Residual path only needs seqlen masking on the last K tile.
-                            need_apply_mask = step == end_count - 1
-                        # Si -> Pi
-                        (
-                            row_max,
-                            row_sum,
-                            mma_s_consumer,
-                            p_mma_producer,
-                            s_corr_producer,
-                        ) = self.softmax_step(
-                            (need_apply_mask, window_size_left, window_size_right),
-                            (
-                                row_max_prev,
-                                row_sum,
-                                seqlen_q,
-                                seqlen_k,
-                                scale_softmax_log2,
-                            ),
-                            (tStS, tScS_iter),
-                            (mma_s_consumer, p_mma_producer, s_corr_producer),
+                        cS_base = cute.make_identity_tensor(
+                            (self.qk_mma_tiler[0], self.qk_mma_tiler[1])
                         )
-                        row_max_prev = row_max
-                    sum_producer = self.store_sum_max(
-                        row_max,
-                        mLSE,
-                        row_sum,
-                        sSum,
-                        sum_producer,
-                        curr_block_coord,
-                        seqlen_q,
-                        cum_seqlen_q,
-                        cuseqlen_q,
-                        scale_softmax,
-                    )
+                        cS = cute.domain_offset((mma_block_coord[0] * self.qk_mma_tiler[0], 0), cS_base)
+                        tScS = qk_thr_mma.partition_C(cS)
+
+                        for step in cutlass.range(start_count, end_count, 1, unroll=1):
+                            cS_iter = cute.domain_offset((0, step * self.qk_mma_tiler[1]), cS)
+                            tScS_iter = qk_thr_mma.partition_C(cS_iter)
+                            if cutlass.const_expr(self.use_semantic_trip_range):
+                                need_apply_mask = (
+                                    step >= n_block_min_causal_local_mask
+                                    or step < n_block_min_before_local_mask
+                                )
+                            else:
+                                # Residual path only needs seqlen masking on the last K tile.
+                                need_apply_mask = step == end_count - 1
+                            # Si -> Pi
+                            (
+                                row_max,
+                                row_sum,
+                                mma_s_consumer,
+                                p_mma_producer,
+                                s_corr_producer,
+                            ) = self.softmax_step(
+                                (need_apply_mask, window_size_left, window_size_right),
+                                (
+                                    row_max_prev,
+                                    row_sum,
+                                    seqlen_q,
+                                    seqlen_k,
+                                    scale_softmax_log2,
+                                ),
+                                (tStS, tScS_iter),
+                                (mma_s_consumer, p_mma_producer, s_corr_producer),
+                            )
+                            row_max_prev = row_max
+                        sum_producer = self.store_sum_max(
+                            row_max,
+                            mLSE,
+                            row_sum,
+                            sSum,
+                            sum_producer,
+                            curr_block_coord,
+                            seqlen_q,
+                            cum_seqlen_q,
+                            cuseqlen_q,
+                            scale_softmax,
+                        )
                 work_tile = tile_sched.advance_to_next_work()
             p_mma_producer.tail()
             s_corr_producer.tail()
@@ -1342,24 +1345,25 @@ class BlackwellFusedMultiHeadAttentionForward:
                     cS = cute.make_identity_tensor((self.qk_mma_tiler[0], self.qk_mma_tiler[1]))
                     tScS = qk_thr_mma.partition_C(cS)
 
-                    # Empty step as the first step is no need for correction
-                    stats_handle = s_corr_consumer.wait_and_advance()
-                    stats_handle.release()
-                    for step in cutlass.range(1, seqlen_kv_loop_steps, 1, unroll=1):
-                        # Oi-1 -> Oi
-                        mma_corr_consumer, s_corr_consumer = self.correction_rescale(
-                            scale_softmax_log2,
-                            (s_corr_consumer, tStS, tScS),
-                            (mma_corr_consumer, tOtO_staged, cO_staged),
+                    if seqlen_kv_loop_steps > 0:
+                        # Empty step as the first step is no need for correction
+                        stats_handle = s_corr_consumer.wait_and_advance()
+                        stats_handle.release()
+                        for step in cutlass.range(1, seqlen_kv_loop_steps, 1, unroll=1):
+                            # Oi-1 -> Oi
+                            mma_corr_consumer, s_corr_consumer = self.correction_rescale(
+                                scale_softmax_log2,
+                                (s_corr_consumer, tStS, tScS),
+                                (mma_corr_consumer, tOtO_staged, cO_staged),
+                                self.epi_tile,
+                            )
+                        # O_partial -> O_final
+                        mma_corr_consumer, sum_consumer = self.correction_epilog(
+                            (seqlen_q, scale_output),
+                            (sum_consumer, sSum),
+                            (mma_corr_consumer, gO_staged, cO_staged, tOtO_staged),
                             self.epi_tile,
                         )
-                    # O_partial -> O_final
-                    mma_corr_consumer, sum_consumer = self.correction_epilog(
-                        (seqlen_q, scale_output),
-                        (sum_consumer, sSum),
-                        (mma_corr_consumer, gO_staged, cO_staged, tOtO_staged),
-                        self.epi_tile,
-                    )
                 work_tile = tile_sched.advance_to_next_work()
             # NOTE: tmem.free() moved to kernel end to enable cluster-wide sync
 
