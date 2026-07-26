@@ -344,11 +344,48 @@ int fa3_get_num_splits(Flash_fwd_params* params_handle) {
     return get_num_splits(*params_handle);
 }
 
+Flash_fwd_params* flashmaskv2_create_fwd_params_handle() {
+    return fa3_create_fwd_params_handle();
+}
+
+void flashmaskv2_clear_fwd_params_handle(Flash_fwd_params* params_handle) {
+    fa3_clear_fwd_params_handle(params_handle);
+}
+
+void flashmaskv2_destroy_fwd_params_handle(Flash_fwd_params* params_handle) {
+    fa3_destroy_fwd_params_handle(params_handle);
+}
+
+void flashmaskv2_run_mha_fwd_combine(Flash_fwd_params* params_handle,
+                                     cudaStream_t stream,
+                                     bool enable_pdl) {
+    fa3_run_mha_fwd_combine(params_handle, stream, enable_pdl);
+}
+
+void flashmaskv2_run_mha_fwd(Flash_fwd_params* params_handle,
+                             cudaStream_t stream) {
+    fa3_run_mha_fwd(params_handle, stream);
+}
+
+bool flashmaskv2_get_pagedkv_tma(Flash_fwd_params* params_handle) {
+    return fa3_get_pagedkv_tma(params_handle);
+}
+
+bool flashmaskv2_get_pack_gqa(Flash_fwd_params* params_handle) {
+    return fa3_get_pack_gqa(params_handle);
+}
+
+int flashmaskv2_get_num_splits(Flash_fwd_params* params_handle) {
+    return fa3_get_num_splits(params_handle);
+}
+
 #define DEFINE_GETTER_SETTER(type, member) \
 type fa3_fwd_params_get_##member(const Flash_fwd_params* params_handle) { return params_handle->member; } \
 void fa3_fwd_params_set_##member(Flash_fwd_params* params_handle, type value) { params_handle->member = value; } \
 type fa3_bwd_params_get_##member(const Flash_bwd_params* params_handle) { return params_handle->member; } \
-void fa3_bwd_params_set_##member(Flash_bwd_params* params_handle, type value) { params_handle->member = value; }
+void fa3_bwd_params_set_##member(Flash_bwd_params* params_handle, type value) { params_handle->member = value; } \
+type flashmaskv2_fwd_params_get_##member(const Flash_fwd_params* params_handle) { return fa3_fwd_params_get_##member(params_handle); } \
+void flashmaskv2_fwd_params_set_##member(Flash_fwd_params* params_handle, type value) { fa3_fwd_params_set_##member(params_handle, value); }
 
 // The QKV matrices.
 DEFINE_GETTER_SETTER(void *, q_ptr)
